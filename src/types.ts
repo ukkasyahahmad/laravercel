@@ -28,6 +28,7 @@ export interface VercelConfig {
   env: any;
   buildCommand?: string;
   outputDirectory?: string;
+  allEnvVars?: Record<string, string>;
 }
 
 export interface DetectResult {

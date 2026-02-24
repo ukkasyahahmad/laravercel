@@ -97,6 +97,13 @@ export function generateVercelConfig(detect: DetectResult, cwd: string): VercelC
     );
   }
   
+  routes.push(
+    { src: '/css/(.*)', dest: '/public/css/' },
+    { src: '/images/(.*)', dest: '/public/images/' },
+    { src: '/js/(.*)', dest: '/public/js/' },
+    { src: '/vendors/(.*)', dest: '/public/vendors/' }
+  );
+  
   if (detect.hasInertia || detect.hasLivewire) {
     routes.push(
       { src: '/(.*\\.js$)', dest: '/public/$1' },
@@ -106,9 +113,9 @@ export function generateVercelConfig(detect: DetectResult, cwd: string): VercelC
   
   routes.push({ src: '/(.*)', dest: '/api/index.php' });
   
-  const env: Record<string, string> = {
+  const envDefaults: Record<string, string> = {
     'APP_ENV': 'production',
-    'APP_DEBUG': 'false',
+    'APP_DEBUG': 'true',
     'APP_CONFIG_CACHE': '/tmp/config.php',
     'APP_EVENTS_CACHE': '/tmp/events.php',
     'APP_PACKAGES_CACHE': '/tmp/packages.php',
@@ -117,18 +124,21 @@ export function generateVercelConfig(detect: DetectResult, cwd: string): VercelC
     'VIEW_COMPILED_PATH': '/tmp',
     'CACHE_DRIVER': 'array',
     'LOG_CHANNEL': 'stderr',
+    'LOG_LEVEL': 'warning',
     'SESSION_DRIVER': 'cookie',
   };
   
   const envVars = parseEnvFile(cwd);
-  const nonSensitiveEnvVars = getNonSensitiveEnvVars(envVars);
-  const sensitiveVars = getSensitiveVars(envVars);
   
-  if (envVars['APP_URL']) {
-    env['APP_URL'] = envVars['APP_URL'];
+  const env: Record<string, string> = { ...envDefaults };
+  
+  env['APP_URL'] = envVars['APP_URL'] || '';
+  
+  for (const [key, value] of Object.entries(envVars)) {
+    if (value && !SENSITIVE_KEYS.includes(key)) {
+      env[key] = value;
+    }
   }
-  
-  Object.assign(env, nonSensitiveEnvVars);
   
   if (detect.hasLivewire) {
     env['LIVEWIRE_ASSET_PATH'] = '/';
@@ -140,19 +150,18 @@ export function generateVercelConfig(detect: DetectResult, cwd: string): VercelC
     functions: {
       'api/index.php': {
         runtime,
-        memory: 1024,
-        maxDuration: 30,
       },
     },
     routes,
     env,
-    buildCommand: detect.hasVite ? 'npm run build' : (detect.hasMix ? 'npm run prod' : undefined),
+    buildCommand: detect.hasVite ? 'vite build' : (detect.hasMix ? 'npm run prod' : undefined),
     outputDirectory: detect.hasVite || detect.hasMix ? 'public' : undefined,
+    allEnvVars: envVars,
   };
 }
 
 export function generateVercelIgnore(cwd: string): string[] {
-  const ignore = [
+  let ignore = [
     'node_modules/**',
     '.git',
     '.env',
@@ -184,29 +193,164 @@ export function generateVercelIgnore(cwd: string): string[] {
     ignore.push('resources/js/**');
     ignore.push('resources/css/**');
   }
-  
+
+  const wayfinderDirs = [
+    'resources/js/actions',
+    'resources/js/routes',
+    'resources/js/wayfinder',
+  ];
+
+  for (const dir of wayfinderDirs) {
+    const dirPath = path.join(cwd, dir);
+    if (fs.existsSync(dirPath)) {
+      ignore = ignore.filter(item => !item.includes(dir));
+    }
+  }
+
   return ignore;
 }
 
 export function writeVercelJson(config: VercelConfig, cwd: string): void {
-  const envVars = parseEnvFile(cwd);
-  const sensitiveVars = getSensitiveVars(envVars);
-  
-  let content = JSON.stringify(config, null, 2);
-  
-  if (sensitiveVars.length > 0) {
-    content += '\n\n/* ⚠️  Set these in Vercel Dashboard > Settings > Environment Variables:\n';
-    content += ' * ' + sensitiveVars.join('\n * ') + '\n';
-    content += ' */\n';
-  }
-  
   const filePath = path.join(cwd, 'vercel.json');
-  fs.writeFileSync(filePath, content + '\n');
+  
+  const { allEnvVars, ...vercelConfig } = config as any;
+  const content = JSON.stringify(vercelConfig, null, 2) + '\n';
+  fs.writeFileSync(filePath, content);
   console.log('✅ Generated vercel.json');
   
-  if (sensitiveVars.length > 0) {
-    console.log('⚠️  Sensitive vars detected: ' + sensitiveVars.join(', '));
-    console.log('   Set these manually in Vercel Dashboard > Settings > Environment Variables');
+  updateAppServiceProvider(cwd);
+}
+
+function updateAppServiceProvider(cwd: string): void {
+  const appServiceProviderPath = path.join(cwd, 'app/Providers/AppServiceProvider.php');
+  
+  if (!fs.existsSync(appServiceProviderPath)) {
+    console.log('⚠️  AppServiceProvider.php not found, skipping...');
+    return;
+  }
+  
+  let content = fs.readFileSync(appServiceProviderPath, 'utf-8');
+  
+  if (content.includes("URL::forceScheme('https')")) {
+    console.log('✅ AppServiceProvider.php already has forceScheme https');
+    return;
+  }
+  
+  if (!content.includes('use Illuminate\\Support\\Facades\\URL;')) {
+    const insertPos = content.indexOf('class AppServiceProvider');
+    if (insertPos > 0) {
+      content = content.slice(0, insertPos) + 
+                'use Illuminate\\Support\\Facades\\URL;\n' +
+                'use Illuminate\\Support\\Facades\\Log;\n\n' +
+                content.slice(insertPos);
+    }
+  }
+  
+  const productionBlock = `        if ($this->app->environment('production')) {
+            URL::forceScheme('https');
+            Log::setDefaultDriver('stderr');
+        }`;
+  
+  const bootMethodMatch = content.match(/public function boot\(\): void\s*\n\s*\{/);
+  if (bootMethodMatch) {
+    const insertIdx = bootMethodMatch.index! + bootMethodMatch[0].length;
+    const before = content.slice(0, insertIdx);
+    const after = content.slice(insertIdx);
+    
+    content = before + '\n' + productionBlock + '\n' + after;
+  }
+  
+  fs.writeFileSync(appServiceProviderPath, content);
+  console.log('✅ Updated app/Providers/AppServiceProvider.php');
+  
+  updateViteConfig(cwd);
+}
+
+function updateViteConfig(cwd: string): void {
+  const viteConfigTs = path.join(cwd, 'vite.config.ts');
+  const viteConfigJs = path.join(cwd, 'vite.config.js');
+  
+  const viteConfigPath = fs.existsSync(viteConfigTs) ? viteConfigTs : 
+                         fs.existsSync(viteConfigJs) ? viteConfigJs : null;
+  
+  if (!viteConfigPath) {
+    console.log('⚠️  vite.config not found, skipping...');
+    return;
+  }
+  
+  let content = fs.readFileSync(viteConfigPath, 'utf-8');
+  
+  if (content.includes('...(isVercel')) {
+    console.log('✅ vite.config already has wayfinder Vercel skip');
+    updateGitignore(cwd);
+    return;
+  }
+  
+  if (!content.includes("from '@laravel/vite-plugin-wayfinder'")) {
+    console.log('⚠️  wayfinder not found in vite.config, skipping...');
+    updateGitignore(cwd);
+    return;
+  }
+  
+  const isVercelLine = "const isVercel = process.env.VERCEL === '1' || !!process.env.VERCEL;";
+  
+  const wayfinderConditional = `...(isVercel ? [] : [wayfinder({ formVariants: true })]),`;
+  
+  if (!content.includes('const isVercel')) {
+    content = content.replace(
+      /export default defineConfig\(\{/,
+      `${isVercelLine}
+
+export default defineConfig({`
+    );
+  }
+  
+  if (!content.includes('...(isVercel')) {
+    const pluginsMatch = content.match(/plugins:\s*\[([\s\S]*?)\n\s*\],/);
+    if (pluginsMatch) {
+      const pluginsContent = pluginsMatch[1];
+      const newPlugins = pluginsContent.replace(
+        /wayfinder\(\{[\s\S]*?\}\),?/,
+        wayfinderConditional
+      );
+      content = content.replace(pluginsMatch[0], `plugins: [${newPlugins}\n    ],`);
+    }
+  }
+  
+  fs.writeFileSync(viteConfigPath, content);
+  console.log(`✅ Updated ${path.basename(viteConfigPath)} - wayfinder will skip on Vercel`);
+  
+  updateGitignore(cwd);
+}
+
+function updateGitignore(cwd: string): void {
+  const gitignorePath = path.join(cwd, '.gitignore');
+  
+  if (!fs.existsSync(gitignorePath)) {
+    return;
+  }
+  
+  let content = fs.readFileSync(gitignorePath, 'utf-8');
+  
+  const wayfinderDirs = [
+    '/resources/js/actions',
+    '/resources/js/routes',
+    '/resources/js/wayfinder',
+  ];
+  
+  let hasChanges = false;
+  
+  for (const dir of wayfinderDirs) {
+    const regex = new RegExp(`^${dir}(\\s|$)`, 'm');
+    if (regex.test(content)) {
+      content = content.replace(regex, '');
+      hasChanges = true;
+    }
+  }
+  
+  if (hasChanges) {
+    fs.writeFileSync(gitignorePath, content);
+    console.log('✅ Updated .gitignore - removed wayfinder directories');
   }
 }
 
@@ -214,4 +358,20 @@ export function writeVercelIgnore(ignore: string[], cwd: string): void {
   const filePath = path.join(cwd, '.vercelignore');
   fs.writeFileSync(filePath, ignore.join('\n') + '\n');
   console.log('✅ Generated .vercelignore');
+}
+
+export function writeApiIndexPhp(cwd: string): void {
+  const apiDir = path.join(cwd, 'api');
+  const indexPhpPath = path.join(apiDir, 'index.php');
+  
+  if (!fs.existsSync(apiDir)) {
+    fs.mkdirSync(apiDir, { recursive: true });
+  }
+  
+  const content = `<?php
+require __DIR__ . '/../public/index.php';
+`;
+  
+  fs.writeFileSync(indexPhpPath, content);
+  console.log('✅ Generated api/index.php');
 }

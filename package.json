@@ -1,0 +1,30 @@
+{
+  "name": "laravercel",
+  "version": "1.0.0",
+  "description": "Auto-deploy Laravel to Vercel with Inertia and Livewire support",
+  "main": "./dist/index.js",
+  "bin": {
+    "laravercel": "./bin/laravercel.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "tsc"
+  },
+  "keywords": [
+    "laravel",
+    "vercel",
+    "inertia",
+    "livewire",
+    "serverless"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^11.0.0",
+    "fs-extra": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3"
+  }
+}
